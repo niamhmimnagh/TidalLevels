@@ -1,0 +1,461 @@
+---
+title: "GIS Layer Demonstration"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: "hide"
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(sf)
+library(here)
+library(knitr)
+
+theme_set(theme_bw() + theme(legend.position = "right", legend.direction = "vertical"))
+
+gpkg_file <- here::here("outputs", "gis", "MI_OPW_tidal_analysis_v2.gpkg")
+
+if (!file.exists(gpkg_file)) {
+  stop(paste0("GeoPackage not found at: ", gpkg_file, "\nRun the GIS export script first."))
+}
+```
+
+# Introduction
+
+This notebook demonstrates the GIS layers produced from the MI/OPW tidal analysis.
+
+The GeoPackage contains station locations, station-level tidal-feature estimates, and separate spatio-temporal prediction layers for HAT, MHWS, MHWN, MSL, MLWN, MLWS and LAT.
+
+The prediction layers contain posterior mean estimates, posterior standard deviations and 95% credible intervals for every prediction location and year.
+
+# GeoPackage contents
+
+```{r layers}
+gpkg_layers <- st_layers(gpkg_file)
+gpkg_layers
+```
+
+
+# Station locations
+
+The `stations` layer contains one point for each tide-gauge station included in the analysis. It does not contain any tidal feature estimates, simply the location of tide-gauge stations. 
+
+```{r read-stations}
+stations <- st_read(gpkg_file, layer = "stations", quiet = TRUE)
+
+stations
+```
+
+
+
+## Station map
+
+Plotting the station points alone produces the following map.
+
+```{r station-map, fig.width=5, fig.height=7}
+stations |>
+  ggplot() +
+  geom_sf(size = 2) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +
+  labs(title = "Tide-gauge stations", x = "Easting (m)", y = "Northing (m)")
+```
+
+Superimposing the points onto a shapefile of Ireland produces the following map.
+```{r, fig.width=5, fig.height=7}
+## Ireland shapefile
+ireland <- rnaturalearth::ne_countries(scale = "medium", country = "Ireland", returnclass = "sf")
+
+## Plot stations over Ireland
+ggplot() +
+  geom_sf(data = ireland, fill = "grey95", colour = "grey40") +
+  geom_sf(data = stations, size = 2) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = "Tide-gauge stations", x = "Easting (m)", y = "Northing (m)") +
+  theme_bw() +
+  theme(panel.background = element_rect(fill = "aliceblue", colour = NA))
+```
+
+# Station-level tidal features
+
+The `tidal_features` layer contains the tidal characteristics calculated at the tide-gauge stations using the rolling-window harmonic analysis.
+
+Each row represents one station and one midpoint year. HAT, MHWS, MHWN, MSL, MLWN, MLWS and LAT are stored as separate fields.
+
+```{r read-tidal-features}
+tidal_features <- st_read(gpkg_file, layer = "tidal_features", quiet = TRUE)
+
+tidal_features |>
+  st_drop_geometry() |>
+  arrange(StationID, Year) |>
+  slice_head(n = 20) |>
+  kable(digits = 3)
+```
+
+## Available years
+
+Below we check the range of the temporal data provided in the `tidal_features` layer.
+
+```{r tidal-feature-years}
+tidal_features |>
+  st_drop_geometry() |>
+  summarise(first_year = min(Year, na.rm = TRUE), last_year = max(Year, na.rm = TRUE), n_years = n_distinct(Year)) |>
+  kable()
+```
+
+## Example station-level tidal-feature map
+
+Below we choose the Mean High Water Springs tidal feature, along with the final year of the analysis, and we can plot this feature at each tide gauge station.
+
+```{r tidal-feature-settings, fig.width=5, fig.height=7}
+station_feature <- "MHWS"
+
+station_year <- tidal_features |>
+  st_drop_geometry() |>
+  filter(!is.na(.data[[station_feature]])) |>
+  summarise(year = max(Year, na.rm = TRUE)) |>
+  pull(year)
+
+tidal_features |>
+  filter(Year == station_year, !is.na(.data[[station_feature]])) |>
+  ggplot() +
+  geom_sf(aes(colour = .data[[station_feature]]), size = 3) +
+  scale_colour_viridis_c(direction = -1) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = paste(station_feature, "Station-Level Estimates:", station_year), x = "Easting (m)", y = "Northing (m)", colour = paste0(station_feature, " (m)"))
+```
+
+## Tidal features through time at one station
+
+We can also extract and plot tidal features through time. Below we choose Adelphi Quay, and examine all tidal features associated with this station. 
+
+```{r example-station-settings, fig.width=10, fig.height=6}
+example_station <- tidal_features |>
+  st_drop_geometry() |>
+  count(StationID, sort = TRUE) |>
+  slice_head(n = 1) |>
+  pull(StationID)
+
+
+tidal_features |>
+  st_drop_geometry() |>
+  filter(StationID == example_station) |>
+  select(Year, HAT, MHWS, MHWN, MSL, MLWN, MLWS, LAT) |>
+  pivot_longer(-Year, names_to = "Tidal_feature", values_to = "Value") |>
+  filter(!is.na(Value)) |>
+  ggplot(aes(x = Year, y = Value, colour = Tidal_feature)) +
+  geom_line() +
+  geom_point() +
+  labs(title = paste("Station-level tidal features:", example_station), x = "Year", y = "Tidal level (m)", colour = "Tidal feature")
+```
+
+# Spatio-temporal prediction layers
+
+The GeoPackage contains a prediction layer for each tidal feature. The names of each layer are:
+
+```{r prediction-layer-names}
+prediction_layer_names <- paste0("pred_", c("HAT", "MHWS", "MHWN", "MSL", "MLWN", "MLWS", "LAT"))
+
+prediction_layer_names
+```
+
+Each prediction layer contains:
+
+- `year_idx`: model time index;
+- `year_mid`: calendar year represented by that time index;
+- `longitude` and `latitude`: prediction coordinates;
+- `mean`: posterior mean tidal-level prediction;
+- `sd`: posterior standard deviation;
+- `q025`: lower bound of the 95% credible interval;
+- `q975`: upper bound of the 95% credible interval;
+- `geometry`: GIS point geometry.
+
+Note: Each prediction layer is large, so in this notebook we read only the layer currently being used and remove it from memory afterwards. 
+
+## HAT Predictions
+
+In this section we read in the `pred_HAT` layer, examine it in tabular form and create maps to examine both the mean predicted HAT over the study area and the associated standard deviation.
+
+```{r hat-read, fig.width=5, fig.height=7}
+# Read in HAT prediction layer
+pred_HAT <- st_read(gpkg_file, layer = "pred_HAT", quiet = TRUE)
+
+# Examine its structure
+pred_HAT |>
+  st_drop_geometry() |>
+  slice_head(n = 10) |>
+  kable(digits = 3)
+
+# Choose a year to create a map
+hat_year <- max(pred_HAT$year_mid, na.rm = TRUE) # final year of predictions
+
+# Create a map of predictions for the mean HAT
+pred_HAT |>
+  filter(year_mid == hat_year) |>
+  ggplot() +
+  geom_sf(aes(colour = mean), size = 0.8) +
+  scale_colour_viridis_c(direction = -1) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = paste("Predicted HAT:", hat_year), x = "Easting (m)", y = "Northing (m)", colour = "Mean (m)")
+
+# Create a map of predictions for the HAT standard deviation
+pred_HAT |>
+  filter(year_mid == hat_year) |>
+  ggplot() +
+  geom_sf(aes(colour = sd), size = 0.8) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  scale_colour_viridis_c(direction = -1) +
+  labs(title = paste("HAT Prediction Uncertainty:", hat_year), x = "Easting (m)", y = "Northing (m)", colour = "SD (m)")
+
+# cleanup HAT layer
+rm(pred_HAT)
+```
+
+## MHWS Predictions
+In this section we read in the `pred_MHWS` layer, examine it in tabular form and create maps to examine both the mean predicted MHWS over the study area and the associated standard deviation.
+```{r mhws-read, fig.width=5, fig.height=7}
+# Read in MHWS prediction layer
+pred_MHWS <- st_read(gpkg_file, layer = "pred_MHWS", quiet = TRUE)
+
+# Examine its structure
+pred_MHWS |>
+  st_drop_geometry() |>
+  slice_head(n = 10) |>
+  kable(digits = 3)
+
+# Choose a year to create a map
+mhws_year <- max(pred_MHWS$year_mid, na.rm = TRUE) # final year of predictions
+
+# Create a map of predictions for the mean MHWS
+pred_MHWS |>
+  filter(year_mid == mhws_year) |>
+  ggplot() +
+  geom_sf(aes(colour = mean), size = 0.8) +
+  scale_colour_viridis_c(direction = -1) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = paste("Predicted MHWS:", mhws_year), x = "Easting (m)", y = "Northing (m)", colour = "Mean (m)")
+
+# Create a map of predictions for the MHWS standard deviation
+pred_MHWS |>
+  filter(year_mid == mhws_year) |>
+  ggplot() +
+  geom_sf(aes(colour = sd), size = 0.8) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  scale_colour_viridis_c(direction = -1) +
+  labs(title = paste("MHWS Prediction Uncertainty:", mhws_year), x = "Easting (m)", y = "Northing (m)", colour = "SD (m)")
+
+# cleanup MHWS layer
+rm(pred_MHWS)
+```
+
+## MHWN predictions
+In this section we read in the `pred_MHWN` layer, examine it in tabular form and create maps to examine both the mean predicted MHWN over the study area and the associated standard deviation.
+```{r mhwn-read, fig.width=5, fig.height=7}
+# Read in MHWN prediction layer
+pred_MHWN <- st_read(gpkg_file, layer = "pred_MHWN", quiet = TRUE)
+
+# Examine its structure
+pred_MHWN |>
+  st_drop_geometry() |>
+  slice_head(n = 10) |>
+  kable(digits = 3)
+
+# Choose a year to create a map
+mhwn_year <- max(pred_MHWN$year_mid, na.rm = TRUE) # final year of predictions
+
+# Create a map of predictions for the mean MHWN
+pred_MHWN |>
+  filter(year_mid == mhwn_year) |>
+  ggplot() +
+  geom_sf(aes(colour = mean), size = 0.8) +
+  scale_colour_viridis_c(direction = -1) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = paste("Predicted MHWN:", mhwn_year), x = "Easting (m)", y = "Northing (m)", colour = "Mean (m)")
+
+# Create a map of predictions for the MHWN standard deviation
+pred_MHWN |>
+  filter(year_mid == mhwn_year) |>
+  ggplot() +
+  geom_sf(aes(colour = sd), size = 0.8) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  scale_colour_viridis_c(direction = -1) +
+  labs(title = paste("MHWN Prediction Uncertainty:", mhwn_year), x = "Easting (m)", y = "Northing (m)", colour = "SD (m)")
+
+# cleanup MHWN layer
+rm(pred_MHWN)
+```
+
+## MSL predictions
+In this section we read in the `pred_MSL` layer, examine it in tabular form and create maps to examine both the mean predicted MSL over the study area and the associated standard deviation.
+```{r msl-read, fig.width=5, fig.height=7}
+# Read in MSL prediction layer
+pred_MSL <- st_read(gpkg_file, layer = "pred_MSL", quiet = TRUE)
+
+# Examine its structure
+pred_MSL |>
+  st_drop_geometry() |>
+  slice_head(n = 10) |>
+  kable(digits = 3)
+
+# Choose a year to create a map
+msl_year <- max(pred_MSL$year_mid, na.rm = TRUE) # final year of predictions
+
+# Create a map of predictions for the mean MSL
+pred_MSL |>
+  filter(year_mid == msl_year) |>
+  ggplot() +
+  geom_sf(aes(colour = mean), size = 0.8) +
+  scale_colour_viridis_c(direction = -1) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = paste("Predicted MSL:", msl_year), x = "Easting (m)", y = "Northing (m)", colour = "Mean (m)")
+
+# Create a map of predictions for the MSL standard deviation
+pred_MSL |>
+  filter(year_mid == msl_year) |>
+  ggplot() +
+  geom_sf(aes(colour = sd), size = 0.8) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  scale_colour_viridis_c(direction = -1) +
+  labs(title = paste("MSL Prediction Uncertainty:", msl_year), x = "Easting (m)", y = "Northing (m)", colour = "SD (m)")
+
+# cleanup MSL layer
+rm(pred_MSL)
+```
+
+## MLWN predictions
+In this section we read in the `pred_MLWN` layer, examine it in tabular form and create maps to examine both the mean predicted MLWN over the study area and the associated standard deviation.
+```{r mlwn-read, fig.width=5, fig.height=7}
+# Read in MLWN prediction layer
+pred_MLWN <- st_read(gpkg_file, layer = "pred_MLWN", quiet = TRUE)
+
+# Examine its structure
+pred_MLWN |>
+  st_drop_geometry() |>
+  slice_head(n = 10) |>
+  kable(digits = 3)
+
+# Choose a year to create a map
+mlwn_year <- max(pred_MLWN$year_mid, na.rm = TRUE) # final year of predictions
+
+# Create a map of predictions for the mean MLWN
+pred_MLWN |>
+  filter(year_mid == mlwn_year) |>
+  ggplot() +
+  geom_sf(aes(colour = mean), size = 0.8) +
+  scale_colour_viridis_c(direction = -1) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = paste("Predicted MLWN:", mlwn_year), x = "Easting (m)", y = "Northing (m)", colour = "Mean (m)")
+
+# Create a map of predictions for the MLWN standard deviation
+pred_MLWN |>
+  filter(year_mid == mlwn_year) |>
+  ggplot() +
+  geom_sf(aes(colour = sd), size = 0.8) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  scale_colour_viridis_c(direction = -1) +
+  labs(title = paste("MLWN Prediction Uncertainty:", mlwn_year), x = "Easting (m)", y = "Northing (m)", colour = "SD (m)")
+
+# cleanup MLWN layer
+rm(pred_MLWN)
+```
+
+## MLWS predictions
+In this section we read in the `pred_MLWS` layer, examine it in tabular form and create maps to examine both the mean predicted MLWS over the study area and the associated standard deviation.
+```{r mlws-read, fig.width=5, fig.height=7}
+# Read in MLWS prediction layer
+pred_MLWS <- st_read(gpkg_file, layer = "pred_MLWS", quiet = TRUE)
+
+# Examine its structure
+pred_MLWS |>
+  st_drop_geometry() |>
+  slice_head(n = 10) |>
+  kable(digits = 3)
+
+# Choose a year to create a map
+mlws_year <- max(pred_MLWS$year_mid, na.rm = TRUE) # final year of predictions
+
+# Create a map of predictions for the mean MLWS
+pred_MLWS |>
+  filter(year_mid == mlws_year) |>
+  ggplot() +
+  geom_sf(aes(colour = mean), size = 0.8) +
+  scale_colour_viridis_c(direction = -1) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = paste("Predicted MLWS:", mlws_year), x = "Easting (m)", y = "Northing (m)", colour = "Mean (m)")
+
+# Create a map of predictions for the MLWS standard deviation
+pred_MLWS |>
+  filter(year_mid == mlws_year) |>
+  ggplot() +
+  geom_sf(aes(colour = sd), size = 0.8) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  scale_colour_viridis_c(direction = -1) +
+  labs(title = paste("MLWS Prediction Uncertainty:", mlws_year), x = "Easting (m)", y = "Northing (m)", colour = "SD (m)")
+
+# cleanup MLWS layer
+rm(pred_MLWS)
+```
+
+## LAT predictions
+In this section we read in the `pred_LAT` layer, examine it in tabular form and create maps to examine both the mean predicted LAT over the study area and the associated standard deviation.
+```{r lat-read, fig.width=5, fig.height=7}
+# Read in LAT prediction layer
+pred_LAT <- st_read(gpkg_file, layer = "pred_LAT", quiet = TRUE)
+
+# Examine its structure
+pred_LAT |>
+  st_drop_geometry() |>
+  slice_head(n = 10) |>
+  kable(digits = 3)
+
+# Choose a year to create a map
+lat_year <- max(pred_LAT$year_mid, na.rm = TRUE) # final year of predictions
+
+# Create a map of predictions for the mean LAT
+pred_LAT |>
+  filter(year_mid == lat_year) |>
+  ggplot() +
+  geom_sf(aes(colour = mean), size = 0.8) +
+  scale_colour_viridis_c(direction = -1) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  labs(title = paste("Predicted LAT:", lat_year), x = "Easting (m)", y = "Northing (m)", colour = "Mean (m)")
+
+# Create a map of predictions for the LAT standard deviation
+pred_LAT |>
+  filter(year_mid == lat_year) |>
+  ggplot() +
+  geom_sf(aes(colour = sd), size = 0.8) +
+  coord_sf(crs = st_crs(2157), xlim = c(350000, 800000), ylim = c(450000, 1050000), expand = FALSE, datum = NA) +  scale_colour_viridis_c(direction = -1) +
+  labs(title = paste("LAT Prediction Uncertainty:", lat_year), x = "Easting (m)", y = "Northing (m)", colour = "SD (m)")
+
+# cleanup LAT layer
+rm(pred_LAT)
+```
+
+## Comparing prediction layers
+
+The following summary compares the range of posterior mean predictions and uncertainty across the seven prediction layers.
+
+```{r prediction-summary}
+prediction_summary <- map_dfr(prediction_layer_names, \(layer_name) {
+    x <- st_read(gpkg_file, layer = layer_name, quiet = TRUE)
+
+    out <- x |>
+      st_drop_geometry() |>
+      summarise(
+        first_year = min(year_mid, na.rm = TRUE),
+        last_year = max(year_mid, na.rm = TRUE),
+        n_rows = n(),
+        mean_min = min(mean, na.rm = TRUE),
+        mean_max = max(mean, na.rm = TRUE),
+        sd_median = median(sd, na.rm = TRUE),
+        sd_max = max(sd, na.rm = TRUE)) |>
+      mutate(tidal_feature = str_remove(layer_name, "^pred_"), .before = 1)
+
+    rm(x)
+    gc(verbose = FALSE)
+
+    out
+  }
+)
+
+prediction_summary |>
+  kable(digits = 3, format.args = list(big.mark = ","),
+    col.names = c(
+      "Tidal feature",
+      "First year",
+      "Last year",
+      "Rows",
+      "Minimum predicted mean",
+      "Maximum predicted mean",
+      "Median SD",
+      "Maximum SD"))
+```
+
